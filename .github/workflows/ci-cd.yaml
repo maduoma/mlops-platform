@@ -1,0 +1,371 @@
+name: MLOps Platform CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      deploy_environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  KUBECONFIG: ${{ secrets.KUBECONFIG }}
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r pipeline/requirements.txt
+        pip install pytest pytest-cov flake8 black
+
+    - name: Code formatting check
+      run: |
+        black --check --diff pipeline/
+
+    - name: Lint with flake8
+      run: |
+        flake8 pipeline/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 pipeline/ --count --max-complexity=10 --max-line-length=88 --statistics
+
+    - name: Run unit tests
+      run: |
+        pytest pipeline/ -v --cov=pipeline --cov-report=xml --cov-report=term
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  build-and-push:
+    name: Build and Push Container Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  model-training:
+    name: Model Training Pipeline
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install dependencies
+      run: |
+        pip install -r pipeline/requirements.txt
+
+    - name: Configure MLflow
+      run: |
+        echo "MLFLOW_TRACKING_URI=${{ env.MLFLOW_TRACKING_URI }}" >> $GITHUB_ENV
+
+    - name: Run training pipeline
+      id: training
+      run: |
+        cd pipeline
+        python pipeline.py --run
+        echo "model_version=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_OUTPUT
+
+    - name: Model validation
+      run: |
+        cd pipeline
+        python -c "
+        import mlflow
+        import mlflow.sklearn
+        
+        # Validate model performance
+        client = mlflow.tracking.MlflowClient()
+        experiment = client.get_experiment_by_name('music-therapy-model')
+        runs = client.search_runs([experiment.experiment_id], order_by=['start_time DESC'], max_results=1)
+        
+        if runs:
+            latest_run = runs[0]
+            accuracy = latest_run.data.metrics.get('test_accuracy', 0)
+            
+            if accuracy < 0.8:
+                print(f'Model accuracy {accuracy} below threshold 0.8')
+                exit(1)
+            else:
+                print(f'Model validation passed with accuracy: {accuracy}')
+        else:
+            print('No runs found')
+            exit(1)
+        "
+
+    - name: Register model for deployment
+      run: |
+        cd pipeline
+        python -c "
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        client = MlflowClient()
+        
+        # Get latest model version
+        latest_versions = client.get_latest_versions('music-therapy-classifier', stages=['None'])
+        
+        if latest_versions:
+            latest_version = latest_versions[0]
+            
+            # Transition to Staging
+            client.transition_model_version_stage(
+                name='music-therapy-classifier',
+                version=latest_version.version,
+                stage='Staging',
+                archive_existing_versions=True
+            )
+            
+            print(f'Model version {latest_version.version} moved to Staging')
+        "
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-and-push, model-training]
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure Kubernetes context
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=./kubeconfig
+        kubectl config current-context
+
+    - name: Deploy to staging namespace
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Create staging namespace if it doesn't exist
+        kubectl create namespace staging || true
+        
+        # Apply staging-specific configurations
+        kubectl apply -f mlflow/ -n staging
+        
+        # Deploy model to staging
+        sed 's/namespace: kserve-models/namespace: staging/' model-deploy/inferenceservice.yaml | \
+        sed 's/canaryTrafficPercent: 20/canaryTrafficPercent: 100/' | \
+        kubectl apply -f -
+        
+        # Wait for deployment
+        kubectl wait --for=condition=ready pod -l app=music-therapy-model -n staging --timeout=300s
+
+    - name: Run integration tests
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Wait for service to be ready
+        kubectl wait --for=condition=ready inferenceservice/music-therapy-classifier -n staging --timeout=300s
+        
+        # Run integration tests
+        python -c "
+        import requests
+        import json
+        import time
+        
+        # Wait for service to be fully ready
+        time.sleep(30)
+        
+        # Test model endpoint
+        test_data = [[0.5, 0.7, 0.3, 0.8, 0.2, 0.6, 0.4, 0.1, 0.9, 5000]]
+        
+        try:
+            # Get service URL (this would be configured based on your ingress)
+            response = requests.post(
+                'http://music-therapy-classifier.staging.svc.cluster.local/v1/models/music-therapy-classifier:predict',
+                json={'instances': test_data},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f'Model prediction successful: {result}')
+            else:
+                print(f'Model prediction failed: {response.status_code} - {response.text}')
+                exit(1)
+                
+        except Exception as e:
+            print(f'Integration test failed: {e}')
+            exit(1)
+        "
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Promote model to production
+      run: |
+        cd pipeline
+        python -c "
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        client = MlflowClient()
+        
+        # Get latest model in staging
+        staging_versions = client.get_latest_versions('music-therapy-classifier', stages=['Staging'])
+        
+        if staging_versions:
+            staging_version = staging_versions[0]
+            
+            # Transition to Production
+            client.transition_model_version_stage(
+                name='music-therapy-classifier',
+                version=staging_version.version,
+                stage='Production',
+                archive_existing_versions=True
+            )
+            
+            print(f'Model version {staging_version.version} promoted to Production')
+        "
+
+    - name: Configure Kubernetes context
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=./kubeconfig
+
+    - name: Deploy to production with canary
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Deploy with canary settings (20% traffic to new version)
+        kubectl apply -f model-deploy/inferenceservice.yaml -n kserve-models
+        
+        # Monitor deployment
+        kubectl rollout status deployment/music-therapy-classifier-predictor -n kserve-models --timeout=600s
+
+    - name: Monitor canary deployment
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Monitor for 5 minutes
+        echo "Monitoring canary deployment for 5 minutes..."
+        sleep 300
+        
+        # Check error rates and performance metrics
+        # This would integrate with your monitoring system
+        echo "Canary deployment monitoring completed"
+
+    - name: Complete canary deployment
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Update to 100% traffic to new version
+        kubectl patch inferenceservice music-therapy-classifier -n kserve-models \
+          --type='merge' -p='{"spec":{"predictor":{"canaryTrafficPercent":100}}}'
+        
+        echo "Canary deployment completed - 100% traffic to new version"
+
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always()
+
+    steps:
+    - name: Clean up resources
+      run: |
+        # Clean up temporary files
+        rm -f kubeconfig
+        
+        # Clean up old Docker images (this would be environment-specific)
+        echo "Cleanup completed"

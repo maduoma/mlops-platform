@@ -1,0 +1,903 @@
+# Production-grade Prometheus Configuration for MLOps Platform
+# Optimized for security, performance, and comprehensive monitoring
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+    tier: infrastructure
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      scrape_timeout: 10s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'lucid-mlops-production'
+        environment: 'production'
+
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager:9093']
+
+    scrape_configs:
+      # Prometheus itself
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+        scrape_interval: 30s
+        metrics_path: /metrics
+
+      # Kubernetes API server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+          - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: false
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: default;kubernetes;https
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: job
+            replacement: ${1}
+
+      # Kubernetes nodes (kubelet metrics)
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: false
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics
+
+      # Kubernetes node-exporter (system metrics)
+      - job_name: 'kubernetes-nodes-cadvisor'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+      # Kubernetes service endpoints
+      - job_name: 'kubernetes-service-endpoints'
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scheme]
+            action: replace
+            target_label: __scheme__
+            regex: (https?)
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+            action: replace
+            target_label: __address__
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+          - action: labelmap
+            regex: __meta_kubernetes_service_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_service_name]
+            action: replace
+            target_label: kubernetes_name
+
+      # Kubernetes pods with prometheus annotations
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: kubernetes_pod_name
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            action: replace
+            target_label: kubernetes_container_name
+
+      # MLflow server metrics
+      - job_name: 'mlflow-server'
+        static_configs:
+          - targets: ['mlflow-server.mlops-production.svc.cluster.local:5000']
+        metrics_path: /metrics
+        scrape_interval: 30s
+        scrape_timeout: 10s
+        honor_labels: true
+
+      # PostgreSQL metrics (using postgres_exporter)
+      - job_name: 'postgres'
+        static_configs:
+          - targets: ['postgres-exporter.mlops-production.svc.cluster.local:9187']
+        scrape_interval: 30s
+        scrape_timeout: 10s
+
+      # KServe model serving metrics
+      - job_name: 'kserve-models'
+        kubernetes_sd_configs:
+          - role: service
+            namespaces:
+              names:
+                - mlops-serving
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_service_label_serving_kserve_io_inferenceservice]
+            action: replace
+            target_label: model_name
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+        scrape_interval: 15s
+
+      # NGINX Ingress Controller metrics
+      - job_name: 'nginx-ingress'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - ingress-nginx
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: ingress-nginx
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: "10254"
+
+      # Kubeflow metrics (if installed)
+      - job_name: 'kubeflow-pipelines'
+        kubernetes_sd_configs:
+          - role: service
+            namespaces:
+              names:
+                - kubeflow
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+        scrape_interval: 30s
+
+  # Comprehensive alerting rules for MLOps platform
+  rules.yml: |
+    groups:
+      - name: mlops-infrastructure
+        interval: 30s
+        rules:
+          # Infrastructure health alerts
+          - alert: KubernetesNodeDown
+            expr: up{job="kubernetes-nodes"} == 0
+            for: 5m
+            labels:
+              severity: critical
+              team: platform
+            annotations:
+              summary: "Kubernetes node is down"
+              description: "Node {{ $labels.instance }} has been down for more than 5 minutes."
+              runbook_url: "https://docs.lucid-mlops.com/runbooks/node-down"
+
+          - alert: KubernetesNodeHighMemoryUsage
+            expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+            for: 10m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "High memory usage on Kubernetes node"
+              description: "Node {{ $labels.instance }} has high memory usage: {{ $value | humanizePercentage }}"
+
+          - alert: KubernetesNodeHighCPUUsage
+            expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+            for: 15m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "High CPU usage on Kubernetes node"
+              description: "Node {{ $labels.instance }} has high CPU usage: {{ $value }}%"
+
+          - alert: KubernetesNodeHighDiskUsage
+            expr: (node_filesystem_size_bytes{fstype!="tmpfs"} - node_filesystem_free_bytes{fstype!="tmpfs"}) / node_filesystem_size_bytes{fstype!="tmpfs"} * 100 > 85
+            for: 10m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "High disk usage on Kubernetes node"
+              description: "Node {{ $labels.instance }} has high disk usage: {{ $value | humanizePercentage }}"
+
+      - name: mlops-services
+        interval: 30s
+        rules:
+          # MLflow alerts
+          - alert: MLflowServerDown
+            expr: up{job="mlflow-server"} == 0
+            for: 3m
+            labels:
+              severity: critical
+              team: mlops
+              service: mlflow
+            annotations:
+              summary: "MLflow server is down"
+              description: "MLflow server has been unreachable for more than 3 minutes."
+              runbook_url: "https://docs.lucid-mlops.com/runbooks/mlflow-down"
+
+          - alert: MLflowHighResponseTime
+            expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="mlflow-server"}[5m])) > 2
+            for: 5m
+            labels:
+              severity: warning
+              team: mlops
+              service: mlflow
+            annotations:
+              summary: "MLflow server high response time"
+              description: "MLflow server 95th percentile response time is {{ $value }}s"
+
+          # PostgreSQL alerts
+          - alert: PostgreSQLDown
+            expr: up{job="postgres"} == 0
+            for: 2m
+            labels:
+              severity: critical
+              team: platform
+              service: postgres
+            annotations:
+              summary: "PostgreSQL database is down"
+              description: "PostgreSQL database has been unreachable for more than 2 minutes."
+              runbook_url: "https://docs.lucid-mlops.com/runbooks/postgres-down"
+
+          - alert: PostgreSQLHighConnections
+            expr: pg_stat_database_numbackends / pg_settings_max_connections * 100 > 80
+            for: 5m
+            labels:
+              severity: warning
+              team: platform
+              service: postgres
+            annotations:
+              summary: "PostgreSQL high connection usage"
+              description: "PostgreSQL connection usage is {{ $value | humanizePercentage }}"
+
+          - alert: PostgreSQLReplicationLag
+            expr: pg_replication_lag > 30
+            for: 5m
+            labels:
+              severity: warning
+              team: platform
+              service: postgres
+            annotations:
+              summary: "PostgreSQL replication lag"
+              description: "PostgreSQL replication lag is {{ $value }}s"
+
+      - name: model-serving
+        interval: 15s
+        rules:
+          # Model serving alerts
+          - alert: ModelServingDown
+            expr: up{job="kserve-models"} == 0
+            for: 2m
+            labels:
+              severity: critical
+              team: mlops
+              service: kserve
+            annotations:
+              summary: "Model serving endpoint is down"
+              description: "Model {{ $labels.model_name }} has been unreachable for more than 2 minutes."
+              runbook_url: "https://docs.lucid-mlops.com/runbooks/model-serving-down"
+
+          - alert: ModelServingHighLatency
+            expr: histogram_quantile(0.99, rate(kserve_model_request_duration_seconds_bucket[5m])) > 1.0
+            for: 3m
+            labels:
+              severity: warning
+              team: mlops
+              service: kserve
+            annotations:
+              summary: "High model serving latency"
+              description: "Model {{ $labels.model_name }} 99th percentile latency is {{ $value }}s"
+
+          - alert: ModelServingHighErrorRate
+            expr: rate(kserve_model_request_total{status_code!~"2.*"}[5m]) / rate(kserve_model_request_total[5m]) * 100 > 5
+            for: 3m
+            labels:
+              severity: warning
+              team: mlops
+              service: kserve
+            annotations:
+              summary: "High model serving error rate"
+              description: "Model {{ $labels.model_name }} error rate is {{ $value | humanizePercentage }}"
+
+          - alert: ModelServingLowThroughput
+            expr: rate(kserve_model_request_total[5m]) < 0.1
+            for: 10m
+            labels:
+              severity: info
+              team: mlops
+              service: kserve
+            annotations:
+              summary: "Low model serving throughput"
+              description: "Model {{ $labels.model_name }} throughput is {{ $value }} requests/second"
+
+      - name: security-monitoring
+        interval: 60s
+        rules:
+          # Security alerts
+          - alert: UnauthorizedAPIAccess
+            expr: increase(apiserver_audit_total{verb="create",objectRef_resource="pods/exec"}[5m]) > 10
+            for: 0m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Unusual pod exec activity detected"
+              description: "High number of pod exec commands detected: {{ $value }} in 5 minutes"
+
+          - alert: PrivilegedContainerCreated
+            expr: increase(kube_pod_container_status_running{container=~".*privileged.*"}[5m]) > 0
+            for: 0m
+            labels:
+              severity: critical
+              team: security
+            annotations:
+              summary: "Privileged container detected"
+              description: "Privileged container created in namespace {{ $labels.namespace }}"
+---
+# Production-grade Prometheus Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+    tier: infrastructure
+    version: v2.45.0
+spec:
+  replicas: 2 # High availability with multiple replicas
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+        component: monitoring
+        tier: infrastructure
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+        checksum/config:
+          {
+            {
+              include (print $.Template.BasePath "/configmap.yaml") . | sha256sum,
+            },
+          }
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - prometheus
+                topologyKey: kubernetes.io/hostname
+      tolerations:
+        - key: "monitoring"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.45.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus/"
+            - "--web.console.libraries=/etc/prometheus/console_libraries"
+            - "--web.console.templates=/etc/prometheus/consoles"
+            - "--web.enable-lifecycle"
+            - "--web.enable-admin-api"
+            - "--web.external-url=https://prometheus.lucid-mlops.com"
+            - "--storage.tsdb.retention.time=30d"
+            - "--storage.tsdb.retention.size=40GB"
+            - "--storage.tsdb.wal-compression"
+            - "--query.max-concurrency=20"
+            - "--query.max-samples=50000000"
+            - "--query.timeout=2m"
+            - "--web.max-connections=512"
+            - "--storage.tsdb.min-block-duration=2h"
+            - "--storage.tsdb.max-block-duration=2h"
+            - "--log.level=info"
+            - "--log.format=json"
+          ports:
+            - containerPort: 9090
+              name: web
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: prometheus-storage
+              mountPath: /prometheus
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1000m"
+              ephemeral-storage: "2Gi"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+              ephemeral-storage: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - ALL
+        # Sidecar container for configuration reloading
+        - name: config-reloader
+          image: jimmidyson/configmap-reload:v0.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --volume-dir=/etc/prometheus
+            - --webhook-url=http://localhost:9090/-/reload
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /etc/prometheus
+              readOnly: true
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "50m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: prometheus-config
+          configMap:
+            name: prometheus-config
+            defaultMode: 420
+        - name: prometheus-storage
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+---
+# High-performance persistent volume claim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: managed-premium-ssd
+  volumeMode: Filesystem
+---
+# Enhanced ServiceAccount with proper annotations
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+  annotations:
+    azure.workload.identity/client-id: "prometheus-workload-identity"
+automountServiceAccountToken: true
+---
+# Comprehensive ClusterRole with minimal required permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+    component: monitoring
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+      - configmaps
+      - secrets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - daemonsets
+      - replicasets
+      - statefulsets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs:
+      - "/metrics"
+      - "/metrics/cadvisor"
+      - "/healthz"
+      - "/ready"
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+    component: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: mlops-monitoring
+---
+# High-availability Service with session affinity
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  ports:
+    - port: 9090
+      targetPort: 9090
+      protocol: TCP
+      name: web
+  selector:
+    app: prometheus
+---
+# Production-grade Ingress with advanced features
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-ingress
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+  annotations:
+    # Security annotations
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+
+    # SSL/TLS configuration
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-ciphers: "ECDHE-RSA-AES128-GCM-SHA256,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-RSA-AES128-SHA,ECDHE-RSA-AES256-SHA,ECDHE-RSA-AES128-SHA256,ECDHE-RSA-AES256-SHA384"
+    nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
+
+    # Performance annotations
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "on"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "DENY" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';" always;
+
+    # Rate limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-burst: "150"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+
+    # Authentication (uncomment for basic auth)
+    # nginx.ingress.kubernetes.io/auth-type: basic
+    # nginx.ingress.kubernetes.io/auth-secret: prometheus-basic-auth
+    # nginx.ingress.kubernetes.io/auth-realm: 'Prometheus Authentication Required'
+
+    # IP whitelisting (uncomment and configure for production)
+    # nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - prometheus.lucid-mlops.com
+      secretName: prometheus-tls
+  rules:
+    - host: prometheus.lucid-mlops.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus
+                port:
+                  number: 9090
+---
+# Network Policy for enhanced security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-network-policy
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-monitoring
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-production
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-serving
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+    # Allow access to Kubernetes API
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Allow access to monitored services
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-production
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-serving
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 5000 # MLflow
+        - protocol: TCP
+          port: 9187 # PostgreSQL exporter
+        - protocol: TCP
+          port: 10254 # NGINX metrics
+---
+# PodDisruptionBudget for high availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: prometheus-pdb
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: prometheus
+---
+# HorizontalPodAutoscaler for automatic scaling
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: prometheus-hpa
+  namespace: mlops-monitoring
+  labels:
+    app: prometheus
+    component: monitoring
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: prometheus
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

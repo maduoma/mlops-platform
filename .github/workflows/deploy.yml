@@ -1,0 +1,376 @@
+name: Deploy LUCID MLOps Platform
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/**'
+      - 'deploy/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - plan
+          - deploy
+          - destroy
+
+env:
+  TERRAFORM_VERSION: "1.6.0"
+  KUBECTL_VERSION: "1.28.0"
+  HELM_VERSION: "3.12.0"
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    
+    env:
+      TF_STATE_RG: ${{ secrets.TERRAFORM_STATE_RG || 'mlops-terraform-state' }}
+      TF_STATE_STORAGE: ${{ secrets.TERRAFORM_STATE_STORAGE || 'mlopstfstate' }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'West US 2' }}
+      K8S_VERSION: ${{ vars.KUBERNETES_VERSION || '1.28' }}
+    
+    outputs:
+      tfplan-exists: ${{ steps.plan.outputs.tfplan-exists }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+      continue-on-error: true
+
+    - name: Configure Terraform Backend
+      run: |
+        # Create backend configuration
+        cat > infrastructure/azure/backend.conf << EOF
+        resource_group_name  = "${{ env.TF_STATE_RG }}"
+        storage_account_name = "${{ env.TF_STATE_STORAGE }}"
+        container_name      = "tfstate"
+        key                 = "mlops-${{ github.event.inputs.environment || 'staging' }}.tfstate"
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd infrastructure/azure
+        terraform init -backend-config=backend.conf
+
+    - name: Terraform Format Check
+      run: |
+        cd infrastructure/azure
+        terraform fmt -check
+
+    - name: Terraform Validate
+      run: |
+        cd infrastructure/azure
+        terraform validate
+
+    - name: Terraform Plan
+      id: plan
+      run: |
+        cd infrastructure/azure
+        
+        # Create terraform.tfvars from environment
+        cat > terraform.tfvars << EOF
+        environment = "${{ github.event.inputs.environment || 'staging' }}"
+        location = "${{ vars.AZURE_LOCATION || 'West US 2' }}"
+        kubernetes_version = "${{ vars.KUBERNETES_VERSION || '1.28' }}"
+        project_name = "lucid-mlops"
+        
+        tags = {
+          Project = "LUCID-MLOps"
+          Environment = "${{ github.event.inputs.environment || 'staging' }}"
+          ManagedBy = "GitHub-Actions"
+          Repository = "${{ github.repository }}"
+        }
+        EOF
+        
+        terraform plan -out=tfplan -detailed-exitcode
+        echo "tfplan-exists=true" >> $GITHUB_OUTPUT
+
+    - name: Upload Terraform Plan
+      uses: actions/upload-artifact@v3
+      if: steps.plan.outputs.tfplan-exists == 'true'
+      with:
+        name: tfplan-${{ github.event.inputs.environment || 'staging' }}
+        path: infrastructure/azure/tfplan
+        retention-days: 7
+
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    needs: terraform-plan
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    
+    outputs:
+      cluster-name: ${{ steps.apply.outputs.cluster-name }}
+      resource-group: ${{ steps.apply.outputs.resource-group }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Download Terraform Plan
+      uses: actions/download-artifact@v3
+      with:
+        name: tfplan-${{ github.event.inputs.environment || 'staging' }}
+        path: infrastructure/azure/
+
+    - name: Configure Terraform Backend
+      run: |
+        cat > infrastructure/azure/backend.conf << EOF
+        resource_group_name  = "${{ secrets.TERRAFORM_STATE_RG }}"
+        storage_account_name = "${{ secrets.TERRAFORM_STATE_STORAGE }}"
+        container_name      = "tfstate"
+        key                 = "mlops-${{ github.event.inputs.environment || 'staging' }}.tfstate"
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd infrastructure/azure
+        terraform init -backend-config=backend.conf
+
+    - name: Terraform Apply
+      id: apply
+      run: |
+        cd infrastructure/azure
+        terraform apply tfplan
+        
+        # Capture outputs
+        echo "cluster-name=$(terraform output -raw aks_cluster_name)" >> $GITHUB_OUTPUT
+        echo "resource-group=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
+
+    - name: Configure kubectl
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ steps.apply.outputs.resource-group }} \
+          --name ${{ steps.apply.outputs.cluster-name }} \
+          --overwrite-existing
+
+  deploy-platform:
+    name: Deploy MLOps Platform
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    needs: terraform-apply
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: ${{ env.KUBECTL_VERSION }}
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: ${{ env.HELM_VERSION }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Configure kubectl
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ needs.terraform-apply.outputs.resource-group }} \
+          --name ${{ needs.terraform-apply.outputs.cluster-name }} \
+          --overwrite-existing
+
+    - name: Install kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Deploy Platform Infrastructure
+      run: |
+        cd deploy/production
+        
+        # Create namespaces
+        kubectl apply -f namespace.yaml
+        
+        # Wait for namespaces to be ready
+        kubectl wait --for=condition=Ready namespace/mlops-production --timeout=60s
+        kubectl wait --for=condition=Ready namespace/mlops-monitoring --timeout=60s
+        kubectl wait --for=condition=Ready namespace/mlops-serving --timeout=60s
+
+    - name: Install cert-manager
+      run: |
+        helm repo add jetstack https://charts.jetstack.io
+        helm repo update
+        
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --create-namespace \
+          --version v1.13.0 \
+          --set installCRDs=true \
+          --wait --timeout=300s
+
+    - name: Install NGINX Ingress
+      run: |
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+        helm repo update
+        
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx \
+          --create-namespace \
+          --set controller.replicaCount=2 \
+          --set controller.service.type=LoadBalancer \
+          --wait --timeout=300s
+
+    - name: Deploy PostgreSQL
+      run: |
+        cd deploy/production
+        kubectl apply -f postgres.yaml
+        kubectl wait --for=condition=ready pod -l app=postgres -n mlops-production --timeout=300s
+
+    - name: Deploy MLflow
+      run: |
+        cd deploy/production
+        kubectl apply -f mlflow-production.yaml
+        kubectl wait --for=condition=ready pod -l app=mlflow-server -n mlops-production --timeout=300s
+
+    - name: Deploy Monitoring Stack
+      run: |
+        cd deploy/production/monitoring
+        kubectl apply -f prometheus.yaml
+        kubectl apply -f grafana.yaml
+        kubectl wait --for=condition=ready pod -l app=prometheus -n mlops-monitoring --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=grafana -n mlops-monitoring --timeout=300s
+
+    - name: Setup RBAC
+      run: |
+        kubectl apply -f rbac/mlops-rbac.yaml
+
+    - name: Install Kubeflow (Optional)
+      if: vars.INSTALL_KUBEFLOW == 'true'
+      run: |
+        # Clone Kubeflow manifests
+        git clone https://github.com/kubeflow/manifests.git /tmp/kubeflow-manifests
+        cd /tmp/kubeflow-manifests
+        git checkout v1.8.0
+        
+        # Install Kubeflow with retries
+        for i in {1..3}; do
+          if kustomize build example | kubectl apply -f -; then
+            break
+          fi
+          echo "Retry $i failed, waiting 30s..."
+          sleep 30
+        done
+
+    - name: Install KServe
+      run: |
+        kubectl apply -f https://github.com/kserve/kserve/releases/download/v0.11.0/kserve.yaml
+        kubectl apply -f https://github.com/kserve/kserve/releases/download/v0.11.0/kserve-runtimes.yaml
+        kubectl wait --for=condition=ready pod -l control-plane=kserve-controller-manager -n kserve --timeout=300s
+
+    - name: Verify Deployment
+      run: |
+        echo "=== Deployment Status ==="
+        kubectl get pods --all-namespaces
+        echo ""
+        echo "=== Services ==="
+        kubectl get svc --all-namespaces
+        echo ""
+        echo "=== Ingress ==="
+        kubectl get ingress --all-namespaces
+
+    - name: Get Access Information
+      run: |
+        echo "=== Access Information ==="
+        echo "External IP:"
+        kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "Pending..."
+        echo ""
+        echo "Configure DNS records for:"
+        echo "- mlflow.${{ vars.DOMAIN_NAME || 'lucid-mlops.com' }}"
+        echo "- grafana.${{ vars.DOMAIN_NAME || 'lucid-mlops.com' }}"
+        echo "- prometheus.${{ vars.DOMAIN_NAME || 'lucid-mlops.com' }}"
+
+  terraform-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Configure Terraform Backend
+      run: |
+        cat > infrastructure/azure/backend.conf << EOF
+        resource_group_name  = "${{ secrets.TERRAFORM_STATE_RG }}"
+        storage_account_name = "${{ secrets.TERRAFORM_STATE_STORAGE }}"
+        container_name      = "tfstate"
+        key                 = "mlops-${{ github.event.inputs.environment || 'staging' }}.tfstate"
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd infrastructure/azure
+        terraform init -backend-config=backend.conf
+
+    - name: Terraform Destroy
+      run: |
+        cd infrastructure/azure
+        terraform destroy -auto-approve \
+          -var="environment=${{ github.event.inputs.environment || 'staging' }}" \
+          -var="location=${{ vars.AZURE_LOCATION || 'West US 2' }}" \
+          -var="kubernetes_version=${{ vars.KUBERNETES_VERSION || '1.28' }}"

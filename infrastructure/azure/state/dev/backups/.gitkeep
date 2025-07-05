@@ -1,0 +1,23 @@
+# Backup Directory
+
+This directory contains timestamped backups of Terraform state files.
+
+## Backup Format
+
+- **State backups**: `terraform.tfstate.YYYYMMDD-HHMMSS`
+- **Output backups**: `outputs.YYYYMMDD-HHMMSS.json`
+
+## Retention Policy
+
+- Keep last 30 days of backups
+- Archive older backups to long-term storage
+- Clean up automatically via deployment scripts
+
+## Manual Backup
+
+```bash
+# Create manual backup
+../../../scripts/state-manager.sh backup dev
+```
+
+**Note**: Backups are automatically created by deployment scripts.

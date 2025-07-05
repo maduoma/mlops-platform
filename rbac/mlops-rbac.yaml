@@ -1,0 +1,326 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-platform
+  labels:
+    name: mlops-platform
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# MLOps Platform Administrator Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlops-platform-admin
+rules:
+  # Full access to ML-related resources
+  - apiGroups: [""]
+    resources:
+      ["pods", "services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Kubeflow Pipelines access
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # KServe model serving
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices", "trainedmodels"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Networking and ingress
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Monitoring and metrics
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# MLOps Developer Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlops-developer
+rules:
+  # Read access to most resources
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+    resourceNames: ["mlflow-*", "model-*"] # Only ML-related secrets
+  # Limited write access to development resources
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Kubeflow Pipelines - can create and manage own experiments
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["experiments", "runs", "jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # KServe - read access and limited deployment to dev namespaces
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    resourceNames: ["*-dev", "*-staging"]
+---
+# MLOps Data Scientist Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlops-data-scientist
+rules:
+  # Access to experiment and training resources
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update"]
+    resourceNames: ["experiment-*", "notebook-*"]
+  # Kubeflow Notebooks and Experiments
+  - apiGroups: ["kubeflow.org"]
+    resources: ["notebooks", "experiments", "runs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Training jobs
+  - apiGroups: ["kubeflow.org"]
+    resources: ["tfjobs", "pytorchjobs", "mpijobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Hyperparameter tuning
+  - apiGroups: ["kubeflow.org"]
+    resources: ["experiments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Read-only access to models
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get", "list", "watch"]
+---
+# MLOps Read-Only Role (for monitoring/observability)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlops-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+# Service Accounts
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-admin-sa
+  namespace: mlops-platform
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-developer-sa
+  namespace: mlops-platform
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-datascientist-sa
+  namespace: mlops-platform
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-readonly-sa
+  namespace: mlops-platform
+---
+# Role Bindings for different environments
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mlops-admin-binding
+subjects:
+  - kind: ServiceAccount
+    name: mlops-admin-sa
+    namespace: mlops-platform
+  - kind: User
+    name: admin@lucidtherapeutics.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: mlops-platform-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mlops-developer-binding
+subjects:
+  - kind: ServiceAccount
+    name: mlops-developer-sa
+    namespace: mlops-platform
+  - kind: Group
+    name: mlops-developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: mlops-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mlops-datascientist-binding
+subjects:
+  - kind: ServiceAccount
+    name: mlops-datascientist-sa
+    namespace: mlops-platform
+  - kind: Group
+    name: data-scientists
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: mlops-data-scientist
+  apiGroup: rbac.authorization.k8s.io
+---
+# Namespace-specific role bindings for staging/production
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: staging
+  name: mlops-developer-staging
+subjects:
+  - kind: Group
+    name: mlops-developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: mlops-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: production
+  name: mlops-readonly-production
+subjects:
+  - kind: Group
+    name: mlops-developers
+    apiGroup: rbac.authorization.k8s.io
+  - kind: Group
+    name: data-scientists
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: mlops-readonly
+  apiGroup: rbac.authorization.k8s.io
+---
+# Network Policies for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlops-network-policy
+  namespace: mlops-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-platform
+        - namespaceSelector:
+            matchLabels:
+              name: kubeflow
+        - namespaceSelector:
+            matchLabels:
+              name: kserve
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: mlops-platform
+    - to: [] # Allow external access for model serving
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+# Pod Security Policy (deprecated in newer K8s versions, use Pod Security Standards)
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: mlops-restricted-psp
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - "configMap"
+    - "emptyDir"
+    - "projected"
+    - "secret"
+    - "downwardAPI"
+    - "persistentVolumeClaim"
+  runAsUser:
+    rule: "MustRunAsNonRoot"
+  seLinux:
+    rule: "RunAsAny"
+  fsGroup:
+    rule: "RunAsAny"
+---
+# Resource Quotas for different namespaces
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: mlops-development-quota
+  namespace: mlops-platform
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    pods: "50"
+    persistentvolumeclaims: "10"
+    services: "20"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: mlops-production-quota
+  namespace: production
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+    pods: "100"
+    persistentvolumeclaims: "20"
+    services: "50"

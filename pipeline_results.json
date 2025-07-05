@@ -1,0 +1,21 @@
+{
+  "run_id": "run_20250702_003920_2824",
+  "experiment_id": "exp_0",
+  "model_version": "v1",
+  "metrics": {
+    "test_accuracy": 0.16,
+    "test_precision": 0.15549820759685765
+  },
+  "dataset_info": {
+    "n_samples": 1000,
+    "n_features": 10,
+    "train_samples": 800,
+    "test_samples": 200
+  },
+  "model_params": {
+    "n_estimators": 150,
+    "max_depth": 15,
+    "random_state": 42,
+    "is_trained": true
+  }
+}

@@ -1,0 +1,207 @@
+---
+# Production MLOps Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-admin
+  namespace: mlops-production
+  labels:
+    app: mlops-platform
+    environment: production
+---
+# Production MLOps ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlops-admin
+  labels:
+    app: mlops-platform
+    environment: production
+rules:
+  # Core resources for MLOps operations
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - endpoints
+      - persistentvolumeclaims
+      - configmaps
+      - secrets
+      - namespaces
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Deployments and ReplicaSets
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Services and Ingress
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Batch jobs for ML pipelines
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Custom resources for KServe and Kubeflow
+  - apiGroups: ["serving.kserve.io"]
+    resources:
+      - inferenceservices
+      - trainedmodels
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Metrics and monitoring
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+
+  # Events for troubleshooting
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs: ["get", "list", "watch"]
+
+---
+# Bind MLOps admin to production namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mlops-admin-binding
+  labels:
+    app: mlops-platform
+    environment: production
+subjects:
+  - kind: ServiceAccount
+    name: mlops-admin
+    namespace: mlops-production
+roleRef:
+  kind: ClusterRole
+  name: mlops-admin
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Monitoring Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-monitoring
+  namespace: mlops-monitoring
+  labels:
+    app: mlops-platform
+    component: monitoring
+---
+# Monitoring ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mlops-monitoring
+  labels:
+    app: mlops-platform
+    component: monitoring
+rules:
+  # Read access for monitoring
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+
+---
+# Bind monitoring service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mlops-monitoring-binding
+  labels:
+    app: mlops-platform
+    component: monitoring
+subjects:
+  - kind: ServiceAccount
+    name: mlops-monitoring
+    namespace: mlops-monitoring
+roleRef:
+  kind: ClusterRole
+  name: mlops-monitoring
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Model Serving Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlops-serving
+  namespace: mlops-serving
+  labels:
+    app: mlops-platform
+    component: serving
+---
+# Model Serving Role (namespace-scoped)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mlops-serving
+  namespace: mlops-serving
+  labels:
+    app: mlops-platform
+    component: serving
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["serving.kserve.io"]
+    resources:
+      - inferenceservices
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# Bind serving service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mlops-serving-binding
+  namespace: mlops-serving
+  labels:
+    app: mlops-platform
+    component: serving
+subjects:
+  - kind: ServiceAccount
+    name: mlops-serving
+    namespace: mlops-serving
+roleRef:
+  kind: Role
+  name: mlops-serving
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-pvc
+  namespace: mlflow
+  labels:
+    app: mlflow-server
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+---
+# Backup PVC for MLflow data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-backup-pvc
+  namespace: mlflow
+  labels:
+    app: mlflow-server
+    component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard

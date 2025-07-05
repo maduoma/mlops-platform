@@ -1,0 +1,110 @@
+# MLOps Platform - Terraform Variables Example
+# Copy this file to terraform.tfvars and customize for your environment
+
+# Basic Configuration
+resource_group_name = "mlops-platform-demo"
+location           = "East US"
+environment        = "demo"
+
+# Kubernetes Configuration
+kubernetes_version     = "1.28.0"
+enable_gpu_node_pool  = false  # Set to true if GPU workloads are needed
+enable_compute_node_pool = true
+private_cluster_enabled = false # Set to true for enhanced security
+
+# Security Configuration
+enable_private_endpoints = false # Set to true for production
+enable_security_center  = false  # Set to true for production
+security_contact_email  = "admin@yourcompany.com"
+security_contact_phone  = "+1-555-0123"
+
+# Monitoring Configuration
+enable_monitoring_alerts = true
+log_retention_days      = 30
+log_daily_quota_gb      = 5
+
+# Alert Configuration
+alert_email_receivers = [
+  {
+    name          = "admin"
+    email_address = "admin@yourcompany.com"
+  }
+]
+
+# Webhook receivers (optional)
+alert_webhook_receivers = [
+  # {
+  #   name        = "slack-webhook"
+  #   service_uri = "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+  # }
+]
+
+# AKS Admin Groups (replace with your Azure AD group IDs)
+aks_admin_group_object_ids = [
+  # "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+]
+
+# Node Pool Configuration
+system_node_pool_config = {
+  node_count         = 2
+  vm_size           = "Standard_D4s_v3"
+  max_pods          = 110
+  enable_auto_scaling = true
+  min_count         = 1
+  max_count         = 3
+  availability_zones = ["1", "2", "3"]
+}
+
+gpu_node_pool_config = {
+  vm_size           = "Standard_NC6s_v3"  # Contains 1 V100 GPU
+  max_pods          = 110
+  enable_auto_scaling = true
+  min_count         = 0
+  max_count         = 5
+  availability_zones = ["1", "2", "3"]
+  node_taints       = ["sku=gpu:NoSchedule"]
+}
+
+compute_node_pool_config = {
+  vm_size           = "Standard_D8s_v3"
+  max_pods          = 110
+  enable_auto_scaling = true
+  min_count         = 1
+  max_count         = 10
+  availability_zones = ["1", "2", "3"]
+}
+
+# Container Registry Geo-replication (optional for production)
+acr_geo_replications = [
+  # {
+  #   location                = "West US 2"
+  #   zone_redundancy_enabled = true
+  # }
+]
+
+# Common Tags
+common_tags = {
+  Project     = "MLOps-Platform-Demo"
+  Environment = "Demo"
+  Owner       = "Platform-Engineering"
+  CostCenter  = "Engineering"
+  Purpose     = "MLOps-Demo"
+  CreatedBy   = "Terraform"
+}
+
+# Performance and Cost Settings
+# Storage
+storage_account_tier = "Standard"  # Use "Premium" for production
+storage_replication_type = "LRS"   # Use "ZRS" or "GRS" for production
+
+# Container Registry
+container_registry_sku = "Basic"   # Use "Premium" for production
+
+# Key Vault
+key_vault_sku = "standard"         # Use "premium" for HSM-backed keys
+soft_delete_retention_days = 30    # Use 90 for production
+purge_protection_enabled = false   # Set to true for production
+
+# Monitoring
+cpu_alert_threshold = 80
+memory_alert_threshold = 85

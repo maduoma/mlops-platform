@@ -1,0 +1,192 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-secrets
+  namespace: mlops-production
+type: Opaque
+data:
+  # Base64 encoded connection strings - replace with actual values
+  database-url: cG9zdGdyZXNxbCtwc3ljb3BnMjovL21sZmxvdzpwYXNzd29yZEBwb3N0Z3Jlcy5tbG9wcy1wcm9kdWN0aW9uLnN2Yy5jbHVzdGVyLmxvY2FsOjU0MzIvbWxmbG93ZGI=
+  azure-storage-connection: <AZURE_STORAGE_CONNECTION_STRING_BASE64>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlflow-config
+  namespace: mlops-production
+data:
+  MLFLOW_BACKEND_STORE_URI: "postgresql+psycopg2://mlflow:password@postgres.mlops-production.svc.cluster.local:5432/mlflowdb"
+  MLFLOW_DEFAULT_ARTIFACT_ROOT: "azure://mlflow-artifacts"
+  MLFLOW_S3_ENDPOINT_URL: ""
+  MLFLOW_TRACKING_USERNAME: "admin"
+  MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-server
+  namespace: mlops-production
+  labels:
+    app: mlflow-server
+    version: "2.10.2"
+    environment: production
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: mlflow-server
+  template:
+    metadata:
+      labels:
+        app: mlflow-server
+        version: "2.10.2"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "5000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: mlflow-server
+          image: python:3.9-slim
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+              name: http
+              protocol: TCP
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-secrets
+                  key: database-url
+            - name: MLFLOW_DEFAULT_ARTIFACT_ROOT
+              valueFrom:
+                configMapKeyRef:
+                  name: mlflow-config
+                  key: MLFLOW_DEFAULT_ARTIFACT_ROOT
+            - name: AZURE_STORAGE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-secrets
+                  key: azure-storage-connection
+            - name: MLFLOW_TRACKING_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: mlflow-config
+                  key: MLFLOW_TRACKING_USERNAME
+          command:
+            - /bin/bash
+            - -c
+            - |
+              pip install mlflow==2.10.2 psycopg2-binary azure-storage-blob prometheus-client
+              mlflow server \
+                --backend-store-uri $MLFLOW_BACKEND_STORE_URI \
+                --default-artifact-root $MLFLOW_DEFAULT_ARTIFACT_ROOT \
+                --host 0.0.0.0 \
+                --port 5000 \
+                --workers 4 \
+                --enable-proxy-headers
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - mlflow-server
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-server
+  namespace: mlops-production
+  labels:
+    app: mlflow-server
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "5000"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
+      name: http
+  selector:
+    app: mlflow-server
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mlflow-ingress
+  namespace: mlops-production
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - mlflow.lucid-mlops.com
+      secretName: mlflow-tls
+  rules:
+    - host: mlflow.lucid-mlops.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mlflow-server
+                port:
+                  number: 5000

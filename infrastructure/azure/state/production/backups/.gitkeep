@@ -1,0 +1,39 @@
+# Backup Directory - PRODUCTION
+
+This directory contains timestamped backups of **PRODUCTION** Terraform state files.
+
+## ⚠️ CRITICAL IMPORTANCE ⚠️
+
+**These backups are essential for production disaster recovery!**
+
+## Backup Format
+
+- **State backups**: `terraform.tfstate.YYYYMMDD-HHMMSS`
+- **Output backups**: `outputs.YYYYMMDD-HHMMSS.json`
+
+## Retention Policy
+
+- **NEVER delete production backups** without approval
+- Keep minimum 90 days of backups
+- Archive to long-term storage after 30 days
+- Replicate to secondary Azure region
+
+## Manual Backup
+
+```bash
+# ALWAYS create backup before production changes
+../../../scripts/state-manager.sh backup production
+```
+
+## Recovery Procedures
+
+In case of state corruption:
+
+1. **STOP all Terraform operations**
+2. **Assess the situation**
+3. **Contact infrastructure team**
+4. **Restore from most recent backup**
+5. **Validate restoration**
+6. **Document incident**
+
+**Note**: Production backups are automatically created by deployment scripts.

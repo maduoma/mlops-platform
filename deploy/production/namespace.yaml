@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-production
+  labels:
+    name: mlops-production
+    environment: production
+    managed-by: "mlops-platform"
+  annotations:
+    description: "Production namespace for MLOps platform services"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-monitoring
+  labels:
+    name: mlops-monitoring
+    environment: production
+    managed-by: "mlops-platform"
+  annotations:
+    description: "Monitoring namespace for MLOps platform observability"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlops-serving
+  labels:
+    name: mlops-serving
+    environment: production
+    managed-by: "mlops-platform"
+  annotations:
+    description: "Model serving namespace for production ML models"
