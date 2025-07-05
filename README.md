@@ -1,6 +1,6 @@
 # MLOps Platform Demo
 
-🎵 **LUCID Therapeutics - Music Therapy ML Platform**
+🎵 **Therapeutics - Music Therapy ML Platform**
 
 A production-ready MLOps platform demonstrating end-to-end machine learning workflows for music therapy applications. Built with Kubernetes-native tools including Kubeflow, MLflow, and KServe.
 
@@ -388,5 +388,5 @@ This platform includes comprehensive documentation for different use cases:
 
 ---
 
-**Built for LUCID Therapeutics MLOps Platform Engineering**  
+**Built for Therapeutics MLOps Platform Engineering**  
 *Demonstrating production-ready ML platform capabilities*

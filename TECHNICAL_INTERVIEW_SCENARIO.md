@@ -4,11 +4,11 @@
 
 **Duration**: 2 hours  
 **Role**: Machine Learning Platform Engineer  
-**Company**: LUCID Therapeutics  
+**Company**: Therapeutics  
 
 ### 📋 Scenario
 
-LUCID Therapeutics needs to build a production-ready MLOps platform to support their AI-powered health and wellness music therapy models. The platform must handle the complete ML lifecycle from experimentation to production deployment.
+Therapeutics needs to build a production-ready MLOps platform to support their AI-powered health and wellness music therapy models. The platform must handle the complete ML lifecycle from experimentation to production deployment.
 
 ### 🎪 Challenge Requirements
 
@@ -134,4 +134,4 @@ mlops-platform-demo/
 4. **Demo & Testing** (10 min): Show working solution
 5. **Q&A & Optimization** (5 min): Discuss improvements and production considerations
 
-This scenario tests all the key skills mentioned in the job description while providing a realistic, hands-on challenge that mirrors actual MLOps platform engineering work.
+This scenario tests all the key skills mentioned while providing a realistic, hands-on challenge that mirrors actual MLOps platform engineering work.

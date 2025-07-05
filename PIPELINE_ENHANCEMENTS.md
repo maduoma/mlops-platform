@@ -2,7 +2,7 @@
 
 ## 🎯 Overview
 
-Successfully transformed `pipeline.py` into a production-ready MLOps pipeline for LUCID Therapeutics' music therapy model, addressing all type annotation errors and implementing professional-grade features.
+Successfully transformed `pipeline.py` into a production-ready MLOps pipeline for Therapeutics' music therapy model, addressing all type annotation errors and implementing professional-grade features.
 
 ## ✅ Issues Resolved
 
