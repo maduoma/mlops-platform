@@ -1,0 +1,6 @@
+# Ignore Python virtual environments and binary libs
+.venv/
+*.so
+*.pyd
+*.dll
+*.dylib
